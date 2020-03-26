@@ -284,9 +284,9 @@ class Metropolis(SamplerBase):
 
         nup = self.wf.mol.nup
         if id_elec < nup:
-            self.isup[index, :, id_elec] /= R[index].unsqueeze(-1)
+            self.isup[index, :, :, id_elec] /= R[index].unsqueeze(1).unsqueeze(-1)
         else:
-            self.isdown[index, :, id_elec - nup] /= R[index].unsqueeze(-1)
+            self.isdown[index, :, :, id_elec - nup] /= R[index].unsqueeze(1).unsqueeze(-1)
 
     def move(self, id_elec):
         """Move electron one at a time in a vectorized way.
