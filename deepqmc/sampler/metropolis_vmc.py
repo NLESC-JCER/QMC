@@ -10,7 +10,7 @@ class Metropolis(SamplerBase):
     def __init__(self, nwalkers=100, nstep=1000, step_size=3,
                  nelec=1, ndim=1,
                  init={'min': -5, 'max': 5},
-                 move={'type': 'one-elec', 'proba': 'uniform'},
+                 move={'type': 'one-elec-iter', 'proba': 'uniform'},
                  wf=None):
         """Metropolis Hasting generator
 
@@ -55,9 +55,9 @@ class Metropolis(SamplerBase):
 
         if self.movedict['proba'] == 'normal':
             _sigma = self.step_size / \
-                (2*torch.sqrt(2*torch.log(torch.tensor(2.))))
+                (2 * torch.sqrt(2 * torch.log(torch.tensor(2.))))
             self.multiVariate = MultivariateNormal(
-                torch.zeros(self.ndim), _sigma*torch.eye(self.ndim))
+                torch.zeros(self.ndim), _sigma * torch.eye(self.ndim))
 
         self._move_per_iter = 1
         if self.movedict['type'] not in ['all-elec-iter']:
@@ -104,13 +104,13 @@ class Metropolis(SamplerBase):
         with torch.no_grad():
 
             if ntherm < 0:
-                ntherm = self.nstep+ntherm
+                ntherm = self.nstep + ntherm
 
             # init walkers
             self.walkers.initialize(pos=pos)
 
             # first calculations of a0, mo and slater matrices
-            self.init_kalos(self.walkers.pos)
+            self.init_matrices(self.walkers.pos)
 
             pos, rate, idecor = [], 0, 0
 
@@ -129,91 +129,170 @@ class Metropolis(SamplerBase):
                     # new positions
                     Xn = self.move(id_elec)
 
-                    # # new function
-                    ao_new, sup, sdown = self.update_kalos(Xn, id_elec)
-                    R = self.get_proba(sup, sdown, id_elec)
+                    # update the matrices
+                    ao_new, sup, sdown = self.update_matrices(Xn, id_elec)
+
+                    # get transition proba
+                    R, new_wf_val = self.get_transition_probability(sup, sdown, Xn, id_elec)
 
                     # accept the moves
                     index = self._accept(R**2)
 
                     # acceptance rate
                     rate += index.byte().sum().float().to('cpu') / \
-                        (self.nwalkers*self._move_per_iter)
+                        (self.nwalkers * self._move_per_iter)
 
                     # update position/function value
                     self.walkers.pos[index, :] = Xn[index, :]
                     self.ao[index, :, :] = ao_new[index, :, :]
+                    self.wf_values[index] = new_wf_val[index]
 
-                    if id_elec < nup:
-                        self.isup[index, :, id_elec] /= R[index].unsqueeze(-1)
-                    else:
-                        self.isdown[index, :, id_elec -
-                                    nup] /= R[index].unsqueeze(-1)
-
+                    # update the inverse slater matrix
+                    self.update_inverse_slater_matrices(index, R, id_elec)
+                    
                 if (istep >= ntherm):
                     if (idecor % ndecor == 0):
                         pos.append(self.walkers.pos.to('cpu').clone())
                     idecor += 1
 
             if with_tqdm:
-                print("Acceptance rate %1.3f %%" % (rate/self.nstep*100))
+                print(
+                    "Acceptance rate %1.3f %%" %
+                    (rate / self.nstep * 100))
 
         return torch.cat(pos)
 
-    def init_kalos(self, pos):
+    def init_matrices(self, pos):
+        """Compute the AO, Slater and inverse Slater matrices
+        
+        Arguments:
+            pos {torch.tensor} -- positions of the walkers
+        """
 
-        if self.wf is None:
-            raise ValueError('Kalos needs a wf')
-
-        if self.wf.configs_method != 'ground_state':
-            raise ValueError('Kalos only ofr Ground state only')
-
+        # atomic orbitals
         self.ao = self.wf.ao(self.walkers.pos)
-        self.sup, self.sdown = self.get_slater_matrix(self.ao)
-        self.isup = torch.inverse(self.sup)
-        self.isdown = torch.inverse(self.sdown)
 
-    def get_proba(self, sup, sdown, id_elec):
+        # slater matrices
+        self.sup, self.sdown = self.get_slater_matrix(self.ao)
+
+        # determinant of the slater matrices
+        self.det_up, self.det_down = torch.det(self.sup), torch.det(self.sdown)
+
+        # wave function values
+        self.wf_values = self.wf.fc(self.det_up * self.det_down)
+        if self.wf.use_jastrow:
+            self.wf_values *= self.wf.jastrow(self.walkers.pos)
+
+        # inverse of the slater matrices
+        self.isup, self.isdown = torch.inverse(self.sup), torch.inverse(self.sdown)
+
+    def update_matrices(self, pos_new, id_elec):
+        """Update the AO, and Slater matrices when 1 electrons has moved
+        
+        Arguments:
+            pos_new {[type]} -- [description]
+            id_elec {[type]} -- [description]
+        
+        Returns:
+            [type] -- [description]
+        """
+
+        ao_new = self.wf.ao.update(self.ao, pos_new, id_elec)
+        sup_new, sdown_new = self.get_slater_matrix(ao_new)
+
+        return ao_new, sup_new, sdown_new
+
+    def get_slater_matrix(self, ao):
+        """Returns the slater matrices from the AO matrix
+
+        Arguments:
+            ao {torch.tensor} -- AO matrix
+
+        Returns:
+            torch.tensor, torch.tensor -- the slater matrices
+        """
+        mo = self.wf.mo(self.wf.mo_scf(ao))
+        sup, sdown = self.wf.pool(mo, return_matrix=True)
+        return sup, sdown
+
+    
+    def update_slater_determiant(self, sup, sdown, id_elec):
+        """Update the determinant of the slater matrices
+        
+        Arguments:
+            sup {[type]} -- spin up slater matrices
+            sdown {[type]} -- spin down slater matrices
+            id_elec {[type]} -- index of the moving elec
+        """ 
+        
+        if id_elec < self.wf.mol.nup 
+            new_det_up = self._update_det(sup, self.isup, self.det_up, id_elec)
+            new_det_down = self.det_down.clone()
+        else:
+            new_det_up = self.det_up.clone()
+            new_det_down = self._update_det(sdown, self.isdown, 
+                                            self.det_down, id_elec-self.wf.mol.nup)
+        return new_det_up, new_det_down                        
+
+    def _update_det(new_slater_matrix, old_inv_slat_mat, old_det, id_elec):
+        """update the values of the salter determinant
+        
+        Arguments:
+            new_slater_matrix {torch.tensor} -- new slater matrices
+            old_inv_slat_mat {torch.tensor} -- old inverse slater matrices
+            old_det {[type]} -- old determinant of the slater matrices
+            id_elec {[type]} -- index of the eletron
+
+        Returns:
+            torch.tensor -- determinant of the new slater matrices
+        """
+
+        nbatch, ndet, dim, _ = new_slater_matrix.shape
+        ratio = torch.bmm( 
+                new_slater_matrix[:,:,id_elec,:].unsqueeze(2).view(-1,dim,dim),
+                old_inv_slat_mat[:,:,:,id_elec].unsqueeze(-1).view(-1,dim,dim)).view(nbatch,ndet)
+
+        return ratio * old_det
+    
+    def get_transition_probability(self, new_sup, new_sdown, pos, id_elec):
+        """Get the ratio between new/old wave function values
+        
+        Arguments:
+            new_sup {[type]} -- new spin up slater matrices
+            new_sdown {[type]} -- new spin down slater matrices
+            pos {[type]} -- new positions of the electrons
+            id_elec {[type]} -- index of the electroncs
+        
+        Returns:
+            [type] -- ratio new/old, new_wf_values
+        """
+
+        new_det_up, new_det_down = self.update_slater_determiant(new_sup, new_sdown, id_elec)
+        new_wf = self.wf.fc(new_det_up * new_det_down)
+        if self.wf.use_jastrow:
+            new_wf_values *= self.wf.jastrow(pos)
+        return new_wf_values/self.wf_values,  new_wf_values 
+
+    def update_inverse_slater_matrices(self, index, R, id_elec):
+        """Update the inverse slater matrix
+        
+        Arguments:
+            index {[type]} -- index of the accepted move
+            R {[type]} --  transition probability
+            id_elec {[type]} -- index of the electron
+        """
 
         nup = self.wf.mol.nup
         if id_elec < nup:
-            R = torch.bmm(sup[:, id_elec, :].unsqueeze(
-                1), self.isup[:, :, id_elec].unsqueeze(-1)).squeeze()
-
+            self.isup[index, :, id_elec] /= R[index].unsqueeze(-1)
         else:
-
-            R = torch.bmm(sdown[:, id_elec-nup, :].unsqueeze(
-                1), self.isdown[:, :, id_elec-nup].unsqueeze(-1)).squeeze()
-
-        return R
-
-    def update_kalos(self, pos_new, id_elec):
-        t0 = time()
-        ao_new = self.wf.ao.update(self.ao, pos_new, id_elec)
-        print('udpate ', time()-t0)
-        #ao = self.wf.ao(pos_new)
-        #sup, sdown = self.get_slater_matrix(ao_new)
-        #ao_new = self.ao.clone()
-
-        # print('udpate ', time()-t0)
-
-        return self.ao, self.sup, self.sdown
-
-    def get_slater_matrix(self, ao):
-
-        mo = self.wf.mo(self.wf.mo_scf(ao))
-        slater_mat = self.wf.pool(mo, return_matrix=True)
-
-        sup = slater_mat[0][0]
-        sdown = slater_mat[1][0]
-
-        return sup, sdown
+            self.isdown[index, :, id_elec - nup] /= R[index].unsqueeze(-1)
 
     def move(self, id_elec):
         """Move electron one at a time in a vectorized way.
 
         Args:
-            pdf (callable): function to sample
+            idelec (int): index of the electron(s) to move
 
         Returns:
             torch.tensor: new positions of the walkers
@@ -239,7 +318,7 @@ class Metropolis(SamplerBase):
             new_pos[range(self.nwalkers), index,
                     :] += self._move(1)
 
-            return new_pos.view(self.nwalkers, self.nelec*self.ndim)
+            return new_pos.view(self.nwalkers, self.nelec * self.ndim)
 
     def _move(self, num_elec):
         """Return a random array of length size between
@@ -253,13 +332,15 @@ class Metropolis(SamplerBase):
             torch.tensor: random array
         """
         if self.movedict['proba'] == 'uniform':
-            d = torch.rand((self.nwalkers, self.ndim), device=self.device)
+            d = torch.rand(
+                (self.nwalkers, self.ndim), device=self.device)
             return self.step_size * (2. * d - 1.)
 
         elif self.movedict['proba'] == 'normal':
             displacement = self.multiVariate.sample(
                 (self.nwalkers, num_elec)).to(self.device)
-            return displacement.view(self.nwalkers, num_elec*self.ndim)
+            return displacement.view(
+                self.nwalkers, num_elec * self.ndim)
 
     def _accept(self, P):
         """accept the move or not
@@ -277,17 +358,8 @@ class Metropolis(SamplerBase):
 
     def update_ao(self, ao, pos, idelec):
         ao_new = ao.clone()
-        ids, ide = (idelec)*3, (idelec+1)*3
+        ids, ide = (idelec) * 3, (idelec + 1) * 3
 
         ao_new[:, idelec, :] = self.wf.ao(
             pos[:, ids:ide], one_elec=True).squeeze(1)
         return ao_new
-
-
-if __name__ == "__main__":
-
-    def pdf(pos):
-        return torch.exp(-(pos**2).prod(1))
-
-    sampler = Metropolis()
-    pos = sampler.generate(pdf)

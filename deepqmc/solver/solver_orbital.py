@@ -7,8 +7,7 @@ from deepqmc.utils.torch_utils import (DataSet, Loss, OrthoReg)
 
 class SolverOrbital(SolverBase):
 
-    def __init__(self, wf=None, sampler=None, optimizer=None,
-                 scheduler=None):
+    def __init__(self, wf=None, sampler=None, optimizer=None, scheduler=None):
         """Serial solver
 
         Keyword Arguments:
@@ -18,7 +17,7 @@ class SolverOrbital(SolverBase):
             scheduler (torch.schedul) -- Scheduler (default: {None})
         """
 
-        SolverBase.__init__(self, wf, sampler, optimizer)
+        SolverBase.__init__(self, wf, sampler, optimizer, scheduler)
 
     def run(self, nepoch, batchsize=None, loss='variance',
             clip_loss=False, grad='auto'):
