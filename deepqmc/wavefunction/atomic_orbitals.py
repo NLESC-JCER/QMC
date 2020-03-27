@@ -231,8 +231,8 @@ class AtomicOrbitals(nn.Module):
             derivative (int, optional): order of the derivative (0,1,2,).
                                         Defaults to 0.
             jacobian (bool, optional): Return the jacobian (i.e. the sum of
-                                       the derivatives) or the individual
-                                       terms. Defaults to True.
+                                       the derivatives) if True or the individual
+                                       terms if False. Defaults to True.
                                        False only for derivative=1
 
             one_elec (bool, optional): if only one electron is in input
@@ -334,7 +334,7 @@ class AtomicOrbitals(nn.Module):
 
         return ao
 
-    def update(self, ao, pos, idelec):
+    def update(self, ao, pos, idelec, derivative=0, jacobian=True):
         """Update the AO matrix if only the idelec electron has been moved.
 
         Arguments:
@@ -345,10 +345,17 @@ class AtomicOrbitals(nn.Module):
         Returns:
             torch.tensor -- new ao matrix
         """
+
         ao_new = ao.clone()
         ids, ide = (idelec)*3, (idelec+1)*3
-        ao_new[:, idelec, :] = self.forward(
-            pos[:, ids:ide], one_elec=True).squeeze(1)
+
+        if jacobian:
+            ao_new[:, idelec, :] = self.forward(
+                pos[:, ids:ide], one_elec=True, derivative=derivative).squeeze(1)
+        else:
+            ao_new[:, idelec, :, :] = self.forward(
+                pos[:, ids:ide], one_elec=True, derivative=derivative, jacobian=False).squeeze(1)
+                
         return ao_new
 
 
@@ -361,7 +368,7 @@ if __name__ == "__main__":
 
     ao = AtomicOrbitals(m, cuda=False)
 
-    pos = torch.rand(10, ao.nelec*3)
+    pos = torch.rand(25, ao.nelec*3)
 
     t0 = time()
     aoval = ao(pos)

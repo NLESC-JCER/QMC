@@ -60,16 +60,12 @@ class KineticPooling(nn.Module):
             return_local_energy : divide the contrbutions by det(MO) to get
                                   local energy instead of kinetic energy
         Return:
-            K : T Psi (Nbatch, Ndet)
+            K : T Psi (Nbatch, Ndet), Psi
         """
 
         # shortcut up/down matrices
         Aup, Adown = self.orb_proj.split_orbitals(MO)
-        if dJdMO is None and d2JMO is None:
-            Bup, Bdown = self.orb_proj.split_orbitals(d2MO)
-        else:
-            Bup, Bdown = self.orb_proj.split_orbitals(
-                d2MO + 2*dJdMO + d2JMO)
+        Bup, Bdown = self.get_Bkin_matrices(d2MO, dJdMO, d2JMO)
 
         # inverse of MO matrices
         iAup = torch.inverse(Aup)
@@ -79,6 +75,9 @@ class KineticPooling(nn.Module):
         det_prod = torch.det(Aup) * torch.det(Adown)
 
         # kinetic terms
+        print(iAup.shape)
+        print(Bup.shape)
+        exit()
         kinetic = -0.5*(btrace(iAup@Bup) + btrace(iAdown@Bdown)) * det_prod
 
         # reshape
@@ -86,3 +85,20 @@ class KineticPooling(nn.Module):
         det_prod = det_prod.transpose(0, 1)
 
         return kinetic, det_prod
+
+    def get_Bkin_matrices(self, d2MO, dJdMO, d2JMO):
+        """Computes the Bkin matrices 
+        
+        Arguments:
+            d2MO : matrix of \Delta MO vals (Nbatch, Nelec, Nmo)
+            dJdMO : matrix of the \frac{\nabla J}{J} \nabla MO
+            d2JMO : matrix of the \frac{\Delta J}{J} MO
+        """
+        if dJdMO is None and d2JMO is None:
+            Bup, Bdown = self.orb_proj.split_orbitals(d2MO)
+
+        else:
+            Bup, Bdown = self.orb_proj.split_orbitals(
+                d2MO + 2*dJdMO + d2JMO)
+
+        return Bup, Bdown

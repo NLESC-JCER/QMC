@@ -168,7 +168,18 @@ class Orbital(WaveFunction):
         Returns:
             torch.tensor -- MO matrix [nbatch, nelec, nmo]
         """
-        return self.mo(self.mo_scf(self.ao(x, derivative=derivative)))
+        return self._ao2mo(self.ao(x, derivative=derivative))
+
+    def _ao2mo(self,ao):
+        """Comoutes the MO from the AO
+        
+        Arguments:
+            ao {[type]} -- AO matrix
+        
+        Returns:
+            [type] -- MO matrix
+        """
+        return self.mo(self.mo_scf(ao))
 
     def local_energy_jacobi(self, pos):
         """Computes the local energy using the jacobi formula (trace trick)
@@ -210,7 +221,7 @@ class Orbital(WaveFunction):
             djast = djast.transpose(1, 2) / jast.unsqueeze(-1)
 
             dao = self.ao(x, derivative=1, jacobian=False).transpose(2, 3)
-            dmo = self.mo(self.mo_scf(dao)).transpose(2, 3)
+            dmo = self._ao2mo(dao).transpose(2, 3)
             djast_dmo = (djast.unsqueeze(2) * dmo).sum(-1)
 
             d2jast = self.jastrow(x, derivative=2) / jast

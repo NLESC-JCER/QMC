@@ -1,4 +1,5 @@
 from deepqmc.sampler.sampler_base import SamplerBase
+from deepqmc.wavefunction.kinetic_pooling import btrace
 from tqdm import tqdm
 import torch
 from torch.distributions import MultivariateNormal
@@ -130,10 +131,13 @@ class Metropolis(SamplerBase):
                     Xn = self.move(id_elec)
 
                     # update the matrices
-                    ao_new, sup, sdown = self.update_matrices(Xn, id_elec)
+                    ao_new, dao_new, d2ao_new = self.update_ao_matrices(Xn, id_elec)
+
+                    # form the slater matrices of the new AOs
+                    sup_new, sdown_new = self.get_slater_matrix(ao_new)
 
                     # get transition proba
-                    R, new_wf_val = self.get_transition_probability(sup, sdown, Xn, id_elec)
+                    R, new_wf_val = self.get_transition_probability(sup_new, sdown_new, Xn, id_elec)
 
                     # accept the moves
                     index = self._accept(R**2)
@@ -144,11 +148,22 @@ class Metropolis(SamplerBase):
 
                     # update position/function value
                     self.walkers.pos[index, :] = Xn[index, :]
-                    self.ao[index, :, :] = ao_new[index, :, :]
+                    self.ao[index] = ao_new[index]
+                    self.dao[index] = dao_new[index]
+                    self.d2ao[index] = d2ao_new[index]
                     self.wf_values[index] = new_wf_val[index]
 
                     # update the inverse slater matrix
                     self.update_inverse_slater_matrices(index, R, id_elec)
+
+                    # update the Bkin operator
+                    self.Bup[:,index,:,:], self.Bdown[:,index,:,:] = self.get_Bkin_matrices(self.ao[index],
+                                                                                self.dao[index], 
+                                                                                self.d2ao[index], 
+                                                                                self.walkers.pos[index])
+                    
+                    # update the local energies
+                    self.local_energies[index] = self.get_local_energies(index=index)
                     
                 if (istep >= ntherm):
                     if (idecor % ndecor == 0):
@@ -169,9 +184,14 @@ class Metropolis(SamplerBase):
             pos {torch.tensor} -- positions of the walkers
         """
 
-        # atomic orbitals
+        # atomic orbitals / first / second derivatives of the AO
         self.ao = self.wf.ao(self.walkers.pos)
+        self.dao = self.wf.ao(self.walkers.pos, derivative=1, jacobian=False)
+        self.d2ao = self.wf.ao(self.walkers.pos, derivative=2)
 
+        # Bkin operators
+        self.Bup, self.Bdown = self.get_Bkin_matrices(self.ao, self.dao, self.d2ao, self.walkers.pos)
+        
         # slater matrices
         self.sup, self.sdown = self.get_slater_matrix(self.ao)
 
@@ -186,8 +206,11 @@ class Metropolis(SamplerBase):
         # inverse of the slater matrices
         self.isup, self.isdown = torch.inverse(self.sup), torch.inverse(self.sdown)
 
-    def update_matrices(self, pos_new, id_elec):
-        """Update the AO, and Slater matrices when 1 electrons has moved
+        # local energies
+        self.local_energies = self.get_local_energies()
+
+    def update_ao_matrices(self, pos_new, id_elec):
+        """Update the AO, and its derivative matrices when 1 electrons has moved
         
         Arguments:
             pos_new {[type]} -- [description]
@@ -198,9 +221,36 @@ class Metropolis(SamplerBase):
         """
 
         ao_new = self.wf.ao.update(self.ao, pos_new, id_elec)
-        sup_new, sdown_new = self.get_slater_matrix(ao_new)
+        dao_new = self.wf.ao.update(self.dao, pos_new, id_elec, derivative=1, jacobian=False)
+        d2ao_new = self.wf.ao.update(self.d2ao, pos_new, id_elec, derivative=2)
 
-        return ao_new, sup_new, sdown_new
+        return ao_new, dao_new, d2ao_new
+
+    def get_Bkin_matrices(self, ao, dao, d2ao, pos):
+        """Computes the B kin matrices from the ao matrices
+        
+        Arguments:
+            ao {[type]} -- AO matrices
+            dao {[type]} -- first derivative of AOs
+            d2ao {[type]} -- second derivative of the AOs
+            pos {[type]} -- pos to compute the jastrow
+        """
+
+        mo = self.wf._ao2mo(ao)
+        dmo = self.wf._ao2mo(dao.transpose(2,3)).transpose(2,3)
+        d2mo = self.wf._ao2mo(d2ao)
+
+        if self.wf.use_jastrow:
+
+            jast = self.wf.jastrow(pos)
+            djast = self.wf.jastrow(pos, derivative=1, jacobian=False)
+            djast = djast.transpose(1, 2) / jast.unsqueeze(-1)
+            d2jast = self.wf.jastrow(pos, derivative=2) / jast
+
+            djast_dmo = (djast.unsqueeze(2) * dmo).sum(-1)
+            d2jast_mo = d2jast.unsqueeze(-1) * mo
+
+        return self.wf.kinpool.get_Bkin_matrices(d2mo, djast_dmo, d2jast_mo)        
 
     def get_slater_matrix(self, ao):
         """Returns the slater matrices from the AO matrix
@@ -211,8 +261,9 @@ class Metropolis(SamplerBase):
         Returns:
             torch.tensor, torch.tensor -- the slater matrices
         """
-        mo = self.wf.mo(self.wf.mo_scf(ao))
+        mo = self.wf._ao2mo(ao)
         sup, sdown = self.wf.pool(mo, return_matrix=True)
+        
         return sup, sdown
 
     
@@ -289,6 +340,29 @@ class Metropolis(SamplerBase):
         else:
             self.isdown[index, :, :, id_elec - nup] /= R[index].unsqueeze(-1)
 
+    def get_local_energies(self,index=None):
+        """Get the local energy values of the conf in index
+        
+        Arguments:
+            index {[type]} -- index of the confs
+        
+        Returns:
+            [type] -- local energy values
+        """
+
+        if index is None:
+            index = range(self.isup.shape[0])
+
+        kin = -0.5* (btrace(self.isup[index].transpose(0,1) @ self.Bup[:,index,:,:]) + btrace(self.isdown[index].transpose(0,1) @ self.Bdown[:,index,:,:])).transpose(0,1)
+        det_prod = torch.det(self.sup[index]) * torch.det(self.sdown[index])
+        Eloc = self.wf.fc(kin) / self.wf.fc(det_prod)
+
+        Eloc += self.wf.nuclear_potential(self.walkers.pos[index])
+        Eloc += self.wf.electronic_potential(self.walkers.pos[index])
+        Eloc += self.wf.nuclear_repulsion()
+
+        return Eloc
+
     def move(self, id_elec):
         """Move electron one at a time in a vectorized way.
 
@@ -356,21 +430,3 @@ class Metropolis(SamplerBase):
         tau = torch.rand_like(P)
         index = (P >= tau).reshape(-1)
         return index.type(torch.bool)
-
-    def update_ao(self, ao, pos, idelec):
-        """Update the AO matrices after a 1 elec move
-        
-        Arguments:
-            ao {[type]} -- odl AO matrix
-            pos {[type]} -- new positions of the elecs
-            idelec {[type]} -- index of the electron that has move
-        
-        Returns:
-            [type] -- new AO matrix
-        """
-        ao_new = ao.clone()
-        ids, ide = (idelec) * 3, (idelec + 1) * 3
-
-        ao_new[:, idelec, :] = self.wf.ao(
-            pos[:, ids:ide], one_elec=True).squeeze(1)
-        return ao_new
