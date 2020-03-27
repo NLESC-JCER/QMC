@@ -6,9 +6,8 @@ from torch.optim import Adam, SGD, lr_scheduler
 from deepqmc.wavefunction.wf_orbital import Orbital
 from deepqmc.solver.solver_orbital import SolverOrbital
 from deepqmc.utils.torch_utils import set_torch_double_precision
-from deepqmc.sampler.metropolis import Metropolis
-#from deepqmc.sampler.metropolis_update_ao import Metropolis
-#from deepqmc.sampler.metropolis_kalos import Metropolis
+#from deepqmc.sampler.metropolis import Metropolis
+from deepqmc.sampler.metropolis_vmc import Metropolis
 from deepqmc.optim.sr import StochasticReconfiguration
 
 from deepqmc.wavefunction.molecule import Molecule
@@ -40,16 +39,9 @@ wf = Orbital(mol, kinetic='jacobi',
 wf.jastrow.weight.data[0] = 1.
 
 # sampler
-sampler = Metropolis(
-    nwalkers=500,
-    nstep=2000,
-    step_size=0.2,
-    ndim=wf.ndim,
-    nelec=wf.nelec,
-    init=mol.domain('atomic'),
-    move={'type': 'all-elec', 'proba': 'normal'},
-    wf=wf)
-# wf=wf)
+sampler = Metropolis(nwalkers=500, nstep=2000, step_size=0.2, ndim=wf.ndim, nelec=wf.nelec, init=mol.domain('atomic'),
+    move={'type': 'all-elec-iter', 'proba': 'normal'}, wf=wf)
+
 
 # optimizer
 lr_dict = [{'params': wf.jastrow.parameters(), 'lr': 3E-3},

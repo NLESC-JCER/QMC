@@ -149,7 +149,7 @@ class Orbital(WaveFunction):
 
         # pool the mos
         x = self.pool(x)
-        print(x.shape)
+        
         if self.use_jastrow:
             return J*self.fc(x)
 

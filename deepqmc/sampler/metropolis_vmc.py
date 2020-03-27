@@ -109,7 +109,7 @@ class Metropolis(SamplerBase):
             # init walkers
             self.walkers.initialize(pos=pos)
 
-            # first calculations of a0, mo and slater matrices
+            # first calculations of ao, mo and slater matrices
             self.init_matrices(self.walkers.pos)
 
             pos, rate, idecor = [], 0, 0
@@ -177,7 +177,7 @@ class Metropolis(SamplerBase):
 
         # determinant of the slater matrices
         self.det_up, self.det_down = torch.det(self.sup), torch.det(self.sdown)
-
+        
         # wave function values
         self.wf_values = self.wf.fc(self.det_up * self.det_down)
         if self.wf.use_jastrow:
@@ -225,7 +225,7 @@ class Metropolis(SamplerBase):
             id_elec {[type]} -- index of the moving elec
         """ 
         
-        if id_elec < self.wf.mol.nup 
+        if id_elec < self.wf.mol.nup:
             new_det_up = self._update_det(sup, self.isup, self.det_up, id_elec)
             new_det_down = self.det_down.clone()
         else:
@@ -234,6 +234,7 @@ class Metropolis(SamplerBase):
                                             self.det_down, id_elec-self.wf.mol.nup)
         return new_det_up, new_det_down                        
 
+    @staticmethod
     def _update_det(new_slater_matrix, old_inv_slat_mat, old_det, id_elec):
         """update the values of the salter determinant
         
@@ -249,8 +250,8 @@ class Metropolis(SamplerBase):
 
         nbatch, ndet, dim, _ = new_slater_matrix.shape
         ratio = torch.bmm( 
-                new_slater_matrix[:,:,id_elec,:].unsqueeze(2).view(-1,dim,dim),
-                old_inv_slat_mat[:,:,:,id_elec].unsqueeze(-1).view(-1,dim,dim)).view(nbatch,ndet)
+                new_slater_matrix[:,:,id_elec,:].unsqueeze(2).reshape(-1,dim,dim),
+                old_inv_slat_mat[:,:,:,id_elec].unsqueeze(-1).reshape(-1,dim,dim)).view(nbatch,ndet)
 
         return ratio * old_det
     
@@ -268,7 +269,7 @@ class Metropolis(SamplerBase):
         """
 
         new_det_up, new_det_down = self.update_slater_determiant(new_sup, new_sdown, id_elec)
-        new_wf = self.wf.fc(new_det_up * new_det_down)
+        new_wf_values = self.wf.fc(new_det_up * new_det_down)
         if self.wf.use_jastrow:
             new_wf_values *= self.wf.jastrow(pos)
         return new_wf_values/self.wf_values,  new_wf_values 
@@ -284,9 +285,9 @@ class Metropolis(SamplerBase):
 
         nup = self.wf.mol.nup
         if id_elec < nup:
-            self.isup[index, :, :, id_elec] /= R[index].unsqueeze(1).unsqueeze(-1)
+            self.isup[index, :, :, id_elec] /= R[index].unsqueeze(-1)
         else:
-            self.isdown[index, :, :, id_elec - nup] /= R[index].unsqueeze(1).unsqueeze(-1)
+            self.isdown[index, :, :, id_elec - nup] /= R[index].unsqueeze(-1)
 
     def move(self, id_elec):
         """Move electron one at a time in a vectorized way.
@@ -357,6 +358,16 @@ class Metropolis(SamplerBase):
         return index.type(torch.bool)
 
     def update_ao(self, ao, pos, idelec):
+        """Update the AO matrices after a 1 elec move
+        
+        Arguments:
+            ao {[type]} -- odl AO matrix
+            pos {[type]} -- new positions of the elecs
+            idelec {[type]} -- index of the electron that has move
+        
+        Returns:
+            [type] -- new AO matrix
+        """
         ao_new = ao.clone()
         ids, ide = (idelec) * 3, (idelec + 1) * 3
 

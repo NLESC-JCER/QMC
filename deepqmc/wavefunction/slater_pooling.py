@@ -51,7 +51,7 @@ class SlaterPooling(nn.Module):
 
         mo_up, mo_down = self.orb_proj.split_orbitals(input)
         if return_matrix:
-            return mo_up, mo_down
+            return mo_up.transpose(0, 1), mo_down.transpose(0, 1)
         else:
             return (torch.det(mo_up) * torch.det(mo_down)).transpose(0, 1)
 
